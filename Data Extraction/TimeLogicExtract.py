@@ -13,7 +13,7 @@ import logging
 from typing import List, Dict, Any, Set
 from datetime import datetime, timedelta
 import json
-from StoreData import store_mouser_data, store_failed_part_number
+from StoreData import store_mouser_data, store_failed_part_number,delete_part_number
 from mouserAPI import extract_part_details,search_by_part_number_list
 import requests
 from collections import deque
@@ -98,7 +98,7 @@ class APIKeyManager:
 def extract_mouser_data_with_rate_limit(
     part_numbers: Set[str],
     api_keys: List[str],
-    batch_size: int = 50,
+    batch_size: int = 15,
     db_url: str = "mongodb://localhost:27017"
 ) -> Dict[str, int]:
     """
@@ -140,10 +140,30 @@ def extract_mouser_data_with_rate_limit(
                 response = search_by_part_number_list(batch, api_key)
                 key_manager.record_api_call(api_key)
                 
+                # if response and 'SearchResults' in response:
+                #     # Extract specific fields using the existing function and match with original part numbers
+                #     parts_details = []
+                #     matched_parts = set() # Keep track of successfully matched part numbers
+
+                #     for part in response['SearchResults'].get('Parts', []):
+                #         # Find the matching original part number
+                #         original_part = None
+                #         for batch_part in batch:
+                #             if batch_part.lower() in part.get('ManufacturerPartNumber', '').lower():
+                #                 original_part = batch_part
+                #                 break
+                #         if original_part:
+                #             parts_details.extend(extract_part_details({'SearchResults': {'Parts': [part]}}, original_part))
+                #             matched_parts.add(original_part)  # Add to matched parts
+
+                #     if parts_details:
+                #         # Store successful results
+                #         store_mouser_data(parts_details, db_url)
+                #         stats['successful'] += len(parts_details)
+
                 if response and 'SearchResults' in response:
-                    # Extract specific fields using the existing function and match with original part numbers
                     parts_details = []
-                    matched_parts = set() # Keep track of successfully matched part numbers
+                    matched_parts = set()
 
                     for part in response['SearchResults'].get('Parts', []):
                         # Find the matching original part number
@@ -152,26 +172,44 @@ def extract_mouser_data_with_rate_limit(
                             if batch_part.lower() in part.get('ManufacturerPartNumber', '').lower():
                                 original_part = batch_part
                                 break
+                        
                         if original_part:
-                            parts_details.extend(extract_part_details({'SearchResults': {'Parts': [part]}}, original_part))
-                            matched_parts.add(original_part)  # Add to matched parts
+                            part_info = extract_part_details({'SearchResults': {'Parts': [part]}}, original_part)
+                            if part_info:  # Check if part_info is not empty
+                                parts_details.extend(part_info)
+                                matched_parts.add(original_part)
+                                delete_part_number(original_part, db_url, "FailedComponents") # Delete from FailedComponents collection
+                                
 
+                    # Always handle unmatched parts, even if some parts were matched
+                    unmatched_parts = set(batch) - matched_parts
+                    if unmatched_parts:
+                        for part in unmatched_parts:
+                            store_failed_part_number(
+                                part, 
+                                "No matching part details found in response", 
+                                db_url
+                            )
+                        stats['failed'] += len(unmatched_parts)
+
+                    # Store successful results if any
                     if parts_details:
-                        # Store successful results
                         store_mouser_data(parts_details, db_url)
+                        
                         stats['successful'] += len(parts_details)
 
                     
-                    else:
-                        # Store failed parts (those in the batch but not matched in the response)
-                        failed_parts = [part for part in batch if part not in matched_parts]
-                        for part in failed_parts:
-                            store_failed_part_number(
-                                part, 
-                                "No part details found in response", 
-                                db_url
-                            )
-                        stats['failed'] += len(failed_parts)
+                    # else:
+                    #     # Store failed parts (those in the batch but not matched in the response)
+                    #     # failed_parts = [part for part in batch if part not in matched_parts]
+                    #     for part in batch:
+                    #         store_failed_part_number(
+                    #             part, 
+                    #             "No part details found in response", 
+                    #             db_url
+                    #         )
+                    #     stats['failed'] += len(failed_parts)
+
                 else:
                     # Store failed parts
                     for part in batch:

@@ -24,7 +24,7 @@ def get_all_part_numbers(db_url):
     try:
         client = MongoClient(db_url)
         db = client["Data"]
-        components_collection = db["ComponentsCopy"]
+        components_collection = db["ComponentsCopy"] 
 
         
         part_numbers = set()
@@ -45,6 +45,29 @@ def get_all_part_numbers(db_url):
     except Exception as e:
         logger.error(f"Error getting part numbers: {str(e)}")
         return set()
+
+def get_failed_part_number(db_url):
+    try:
+        client = MongoClient(db_url)
+        db = client["Data"]
+        Failed_collection = db["FailedComponents"]
+
+        failed_part_numbers = set()
+        cursor = Failed_collection.find({})
+        for doc in cursor:
+            part_number = doc.get('part_number')
+            if part_number:
+                    failed_part_numbers.add(part_number)
+
+        logger.info(f"Found {len(failed_part_numbers)} unique part numbers")
+        client.close()
+        return failed_part_numbers
+        
+    except Exception as e:
+        logger.error(f"Error getting part numbers: {str(e)}")
+        return set()
+
+
 
 def store_mouser_data(data: List[Dict[str, Any]], db_url):
     """
@@ -98,7 +121,8 @@ def store_failed_part_number(part_number: str, reason: str, db_url):
     try:
         client = MongoClient(db_url)
         db = client["Data"]
-        Failed_collection = db["FailedComponents"]
+        # Failed_collection = db["FailedComponents"]
+        Failed_collection = db["FailedComponentsCopy"]
 
         
         document = {
@@ -114,6 +138,50 @@ def store_failed_part_number(part_number: str, reason: str, db_url):
         
     except Exception as e:
         logger.error(f"Error storing failed part number: {str(e)}")
+        return False
+
+def delete_part_number(part_number: str, db_url,collection_name) -> bool:
+    """
+    Delete a part number from all relevant collections in the database.
+    
+    Args:
+        part_number (str): The part number to delete
+        db_url (str): MongoDB connection URL
+        
+    Returns:
+        bool: True if deletion was successful, False otherwise
+    """
+    try:
+        client = MongoClient(db_url)
+        db = client["Data"]
+        # components_collection = db["ComponentsCopy"]
+        # mouser_collection = db["MouserComponents"]
+        failed_collection = db[collection_name]
+
+        # # Delete from ComponentsCopy collection
+        # result1 = components_collection.update_many(
+        #     {"subcategories.extracted_components.part_number": part_number},
+        #     {"$pull": {"subcategories.$.extracted_components": {"part_number": part_number}}}
+        # )
+
+        # Delete from MouserComponents collection
+        # result2 = mouser_collection.delete_one({"ManufacturerPartNumber": part_number})
+
+        # Delete from FailedComponents collection
+        result3 = failed_collection.delete_one({"part_number": part_number})
+
+        client.close()
+        
+        # Log the deletion results
+        logger.info(f"Deleted part number {part_number}:")
+        # logger.info(f"Components modified: {result1.modified_count}")
+        # logger.info(f"Mouser components deleted: {result2.deleted_count}")
+        logger.info(f"Failed components deleted: {result3.deleted_count}")
+        
+        return True
+
+    except Exception as e:
+        logger.error(f"Error deleting part number {part_number}: {str(e)}")
         return False
 
 def process_all_components(db_url: str = "mongodb://localhost:27017/") -> Dict[str, int]:

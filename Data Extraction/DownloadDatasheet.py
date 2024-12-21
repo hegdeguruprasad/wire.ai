@@ -10,6 +10,7 @@ from datetime import datetime
 import logging
 from urllib.parse import urlparse
 from pathlib import Path
+import pandas as pd
 
 # Configure logging
 logging.basicConfig(
@@ -21,6 +22,21 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+def save_failed_downloads(failed_downloads, output_file="failed_downloads.xlsx"):
+    """
+    Save failed download attempts to an Excel file.
+
+    Args:
+        failed_downloads (list): List of dictionaries containing Part_Number and URL
+        output_file (str): Path to the output Excel file
+    """
+    if failed_downloads:
+        df = pd.DataFrame(failed_downloads)
+        df.to_excel(output_file, index=False)
+        logger.info(f"Failed downloads saved to {output_file}")
+    else:
+        logger.info("No failed downloads to save")
 
 def download_datasheets(db_url, db_name, collection_name, download_dir):
     """
@@ -54,6 +70,7 @@ def download_datasheets(db_url, db_name, collection_name, download_dir):
         
         download_count = 0
         error_count = 0
+        failed_downloads = []
 
         for doc in cursor:
             try:
@@ -65,6 +82,7 @@ def download_datasheets(db_url, db_name, collection_name, download_dir):
 
                 if not url:
                     logger.warning(f"Skipping {part_number} - No URL found")
+                    failed_downloads.append({"Part_Number": part_number, "URL": url})
                     continue
 
                 # Generate filename
@@ -99,26 +117,34 @@ def download_datasheets(db_url, db_name, collection_name, download_dir):
                     {
                         "$set": {
                             "LocalDatasheetPath": str(filepath),
-                            "DatasheetDownloadDate": datetime.now()
+                            "DownloadStatus": "Success",
+                            "DownloadTimestamp": datetime.now()
                         }
                     }
                 )
-                logger.info(f"Updated MongoDB record for {part_number}")
-                
-            except requests.exceptions.RequestException as e:
-                error_count += 1
-                logger.error(f"Failed to download datasheet for {part_number}: {str(e)}")
             except Exception as e:
                 error_count += 1
-                logger.error(f"Error processing {part_number}: {str(e)}")
+                logger.error(f"Error downloading datasheet for {part_number}: {str(e)}")
+                failed_downloads.append({"Part_Number": part_number, "URL": url})
+                # Update MongoDB with error status
+                collection.update_one(
+                    {"_id": doc["_id"]},
+                    {
+                        "$set": {
+                            "DownloadStatus": "Failed",
+                            "DownloadError": str(e),
+                            "DownloadTimestamp": datetime.now()
+                        }
+                    }
+                )
+
+        logger.info(f"Download process completed. Successfully downloaded: {download_count}, Errors: {error_count}")
         
-        logger.info(f"Download process completed")
-        logger.info(f"Total documents processed: {doc_count}")
-        logger.info(f"Successfully downloaded: {download_count}")
-        logger.info(f"Errors encountered: {error_count}")
-                
+        # Save failed downloads to Excel
+        save_failed_downloads(failed_downloads)
+        
     except Exception as e:
-        logger.error(f"Fatal error in download_datasheets: {str(e)}", exc_info=True)
+        logger.error(f"An error occurred during the download process: {str(e)}")
     finally:
         client.close()
         logger.info("MongoDB connection closed")
