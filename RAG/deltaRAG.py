@@ -32,7 +32,12 @@ from pymongo import MongoClient
 from langchain_community.vectorstores.pgvector import PGVector
 import psycopg2
 from psycopg2.extras import Json
-from psycopg2 import OperationalError
+# from psycopg2 import OperationalError
+# import psycopg
+from langchain_postgres import PGVector  # New import
+from psycopg import connect, OperationalError  # Updated import
+from psycopg.rows import dict_row
+from langchain_postgres import PGVector
 
 load_dotenv()
 
@@ -301,6 +306,8 @@ class DocumentStore:
         self.components_collection = self.db[collection]
         self.docs = self.db.processed_documents
         self.sections = self.db.document_sections
+        # Add embeddings collection to track which elements have embeddings
+        self.embeddings = self.db.embeddings_tracking
         
     def store_document(self, file_path: str, processed_sections: List[Dict], 
                       chunked_sections: List[Dict]) -> str:
@@ -349,23 +356,55 @@ class DocumentStore:
             return None, None
         return ([s["processed_data"] for s in sections], 
                 [s["original_chunk"] for s in sections])
+    
+    def has_embeddings(self, doc_id: str, element_id: str) -> bool:
+        """Check if element already has embeddings stored."""
+        return bool(self.embeddings.find_one({
+            "document_id": doc_id,
+            "element_id": element_id
+        }))
+
+    def track_embedding(self, doc_id: str, element_id: str, category: str):
+        """Track that an element has embeddings stored."""
+        self.embeddings.update_one(
+            {
+                "document_id": doc_id,
+                "element_id": element_id
+            },
+            {
+                "$set": {
+                    "category": category,
+                    "created_at": datetime.now()
+                }
+            },
+            upsert=True
+        )
+
+
 
 class VectorStore:
     """Handle storage of vector embeddings."""
-    
     def __init__(self, dbname: str, user: str, password: str, host: str, port: int):
         try:
-            self.connection = psycopg2.connect(
-                database=dbname, user=user, password=password,
-                host=host, port=port
+        #   Create initial connection
+            self.connection = connect(
+                dbname=dbname,
+                user=user,
+                password=password,
+                host=host,
+                port=port
             )
-            connection_string = (f"postgresql+psycopg2://{user}:{password}"
-                               f"@{host}:{port}/{dbname}")
+            
+            conn_str = f"postgresql+psycopg://{user}:{password}@{host}:{port}/{dbname}"
+
+            # Assuming PGVector accepts 'connection' parameter
             self.store = PGVector(
                 collection_name="pdf_vectors",
-                connection_string=connection_string,
-                embedding_function=OpenAIEmbeddings()
+                connection=conn_str,  # Pass the connection object
+                embeddings=OpenAIEmbeddings(),
+                use_jsonb=True  # Enable JSONB metadata
             )
+            print("Connection to PostgreSQL DB successful")
         except OperationalError as e:
             print(f"Error connecting to PostgreSQL: {e}")
             raise
@@ -382,8 +421,11 @@ class RAGSystem:
         self.vector_store = vector_store
         self.llm = ChatOpenAI(model="gpt-4o-mini", max_tokens=1000)
 
+
+
     def setup_retriever(self, processed_sections: List[Dict],
-                       chunked_sections: List[Dict]) -> MultiVectorRetriever:
+                   chunked_sections: List[Dict],
+                   doc_id: str) -> MultiVectorRetriever:
         """Set up retriever with MongoDB and PostgreSQL integration."""
         mongo_store = MongoDocStore(self.doc_store.sections)
         retriever = MultiVectorRetriever(
@@ -393,45 +435,60 @@ class RAGSystem:
             search_kwargs={"k": 5}
         )
         
-        self._store_vectors(retriever, processed_sections, chunked_sections)
+        self._store_vectors(retriever, processed_sections, chunked_sections, doc_id)
         return retriever
+
+
 
     def _store_vectors(self, retriever: MultiVectorRetriever,
                       processed_sections: List[Dict],
-                      chunked_sections: List[Dict]) -> None:
+                      chunked_sections: List[Dict],
+                      doc_id: str) -> None:
         """Store vectors in PostgreSQL and documents in MongoDB."""
+
         id_key = "element_id"
         
         for result in processed_sections:
-            # Store section vectors
-            section_doc = Document(
-                page_content=result["title_text_summary"],
-                metadata={
-                    "category": "Section",
-                    id_key: result["element_id"]
-                }
-            )
-            self.vector_store.store.add_documents([section_doc])
+            element_id = result["element_id"]
+            
+            # Check if section vectors already exist
+            if not self.doc_store.has_embeddings(doc_id, element_id):
+                # Store section vectors
+                section_doc = Document(
+                    page_content=result["title_text_summary"],
+                    metadata={
+                        "category": "Section",
+                        id_key: element_id
+                    }
+                )
+                self.vector_store.store.add_documents([section_doc])
+                self.doc_store.track_embedding(doc_id, element_id, "Section")
             
             # Find and store original section
             original_section = next(
                 section for section in chunked_sections
-                if section['metadata']['element_id'] == result['element_id']
+                if section['metadata']['element_id'] == element_id
             )
-            retriever.docstore.mset([(result["element_id"], original_section)])
+            retriever.docstore.mset([(element_id, original_section)])
             
             # Store content items
             for summary_content in result["contents"]:
                 content_id = summary_content["unique_id"]
-                content_doc = Document(
-                    page_content=summary_content["summary"],
-                    metadata={
-                        "category": summary_content["category"],
-                        id_key: content_id,
-                        "parent_section": result["element_id"]
-                    }
-                )
-                self.vector_store.store.add_documents([content_doc])
+                
+                # Check if content vectors already exist
+                if not self.doc_store.has_embeddings(doc_id, content_id):
+                    content_doc = Document(
+                        page_content=summary_content["summary"],
+                        metadata={
+                            "category": summary_content["category"],
+                            id_key: content_id,
+                            "parent_section": element_id
+                        }
+                    )
+                    self.vector_store.store.add_documents([content_doc])
+                    self.doc_store.track_embedding(
+                        doc_id, content_id, summary_content["category"]
+                    )
                 
                 original_content = next(
                     content for content in original_section['content']
@@ -594,7 +651,7 @@ def main():
     
     # Set up RAG system
     rag_system = RAGSystem(doc_store, vector_store)
-    retriever = rag_system.setup_retriever(processed_sections, chunked_sections)
+    retriever = rag_system.setup_retriever(processed_sections, chunked_sections,doc_id)
     
     # Run interactive loop
     run_interactive_loop(rag_system, retriever)
