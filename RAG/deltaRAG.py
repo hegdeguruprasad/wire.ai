@@ -300,14 +300,14 @@ class MongoDocStore(BaseStore[str, Dict]):
 class DocumentStore:
     """Handle storage of processed PDF documents."""
     
-    def __init__(self, connection_string: str, database: str, collection: str):
+    def __init__(self, connection_string: str, database: str, docs:str,  sections: str, embeddings: str):
         self.client = MongoClient(connection_string)
         self.db = self.client[database]
-        self.components_collection = self.db[collection]
-        self.docs = self.db.processed_documents
-        self.sections = self.db.document_sections
+        # self.components_collection = self.db[collection]
+        self.docs = self.db[docs]
+        self.sections = self.db[sections]
         # Add embeddings collection to track which elements have embeddings
-        self.embeddings = self.db.embeddings_tracking
+        self.embeddings = self.db[embeddings]
         
     def store_document(self, file_path: str, processed_sections: List[Dict], 
                       chunked_sections: List[Dict]) -> str:
@@ -613,7 +613,10 @@ def main():
     doc_store = DocumentStore(
         connection_string="mongodb://localhost:27017",
         database="VectorDatabase",
-        collection="VectorData"
+        docs= "processed_documents",
+        sections= "document_sections",
+        embeddings= "embeddings_tracking"
+
     )
 
     vector_store = VectorStore(
