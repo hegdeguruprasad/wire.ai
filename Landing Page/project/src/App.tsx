@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Brain, BrainCircuit as Circuit, Workflow, Github, Twitter, Linkedin, Search, BarChart as FlowChart, CircuitBoard, Network as Network2, FileCheck, Upload, Settings, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Brain, BrainCircuit as Circuit, Workflow, Search, BarChart as FlowChart, CircuitBoard, Network as Network2, FileCheck, Upload, Settings, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ParticleBackground } from './components/ParticleBackground';
 import { Logo } from './components/Logo';
 
@@ -77,8 +77,13 @@ function App() {
       <ParticleBackground />
 
 
-      {/* Logo */}
+      {/* Logo
       <div className="fixed top-0 left-0 z-50 p-6">
+        <Logo />
+      </div> */}
+
+      {/* Logo */}
+            <div className="p-6">
         <Logo />
       </div>
 
