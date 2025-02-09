@@ -40,6 +40,7 @@ from psycopg.rows import dict_row
 from langchain_postgres import PGVector
 from bson import ObjectId  # Add this
 import json  # Add this
+from tiktoken import get_encoding  # OpenAI token counting
 
 load_dotenv()
 
@@ -327,10 +328,6 @@ class DocumentStore:
         else:
             return str(data)
 
-        
-
-
-
     def store_document(self, file_path: str, processed_sections: List[Dict], 
                       chunked_sections: List[Dict], doc_id: str = None) -> str:
         """Store document with improved error handling."""
@@ -366,7 +363,6 @@ class DocumentStore:
             logging.error(f"Error storing document: {str(e)}")
             raise
 
-
     def _store_metadata(self, file_path: str, processed_sections: List[Dict]) -> str:
         doc_metadata = {
             "file_name": os.path.basename(file_path),
@@ -375,9 +371,6 @@ class DocumentStore:
         }
         result = self.docs.insert_one(doc_metadata)
         return str(result.inserted_id)
-
-
-
 
     def _store_sections(self, doc_id: str, processed_sections: List[Dict],
                        chunked_sections: List[Dict]) -> None:
@@ -404,9 +397,6 @@ class DocumentStore:
         except Exception as e:
             logging.error(f"Error storing section: {str(e)}")
             raise ValueError(f"Failed to store section: {str(e)}")
-        
-
-
 
     def _validate_structure(self, document: Dict) -> bool:
         """More permissive validation for server context."""
@@ -426,7 +416,6 @@ class DocumentStore:
         except Exception as e:
             logging.error(f"Validation error: {str(e)}")
             return False
-
 
     def get_document_sections(self, doc_id: str) -> tuple:
         """Retrieve processed sections for a document."""
@@ -459,15 +448,9 @@ class DocumentStore:
             upsert=True
         )
 
-
-
 class VectorStore:
-    """Handle storage of vector embeddings."""
-
-
     """Handle storage of vector embeddings using Supabase PostgreSQL."""
 
-    
     def __init__(self, db_url: str, collection_name: str = "pdf_vectors"):
         retry_count = 0
         max_retries = 3
@@ -490,10 +473,19 @@ class VectorStore:
                 print(f"Connection attempt {retry_count} failed, retrying in 5 seconds...")
                 time.sleep(5)
 
-    # def close(self):
-    #     """Close database connection."""
-    #     if hasattr(self, 'store'):
-    #         self.store._conn.close()
+    def close(self):
+        """Close database connection."""
+        if hasattr(self, 'store'):
+            self.store.connection.close()
+
+def convert_keys_to_strings(d):
+    """Recursively convert dictionary keys to strings."""
+    if isinstance(d, dict):
+        return {str(k): convert_keys_to_strings(v) for k, v in d.items()}
+    elif isinstance(d, list):
+        return [convert_keys_to_strings(i) for i in d]
+    else:
+        return d
 
 # RAG Implementation
 class RAGSystem:
@@ -501,8 +493,6 @@ class RAGSystem:
         self.doc_store = doc_store
         self.vector_store = vector_store
         self.llm = ChatOpenAI(model="gpt-4o-mini", max_tokens=1000)
-
-
 
     def setup_retriever(self, processed_sections: List[Dict],
                    chunked_sections: List[Dict],
@@ -518,8 +508,6 @@ class RAGSystem:
         
         self._store_vectors(retriever, processed_sections, chunked_sections, doc_id)
         return retriever
-
-
 
     def _store_vectors(self, retriever: MultiVectorRetriever,
                       processed_sections: List[Dict],
@@ -550,7 +538,8 @@ class RAGSystem:
                 section for section in chunked_sections
                 if section['metadata']['element_id'] == element_id
             )
-            retriever.docstore.mset([(element_id, original_section)])
+            cleaned_section = convert_keys_to_strings(original_section)
+            retriever.docstore.mset([(element_id, cleaned_section)])
             
             # Store content items
             for summary_content in result["contents"]:
@@ -578,17 +567,51 @@ class RAGSystem:
                 retriever.docstore.mset([(content_id, original_content)])
 
     def process_question(self, retriever: MultiVectorRetriever, question: str) -> str:
-        """Process a single question using a fresh RAG chain."""
-        chain = (
-            {
-                "context": retriever | RunnableLambda(self._format_docs),
-                "question": RunnablePassthrough()
-            }
-            | RunnableLambda(self._build_prompt)
-            | self.llm
-            | StrOutputParser()
-        )
-        return chain.invoke(question)
+        """Retrieves top 5 relevant sections and ensures token limit compliance."""
+
+        retrieved_results = retriever.invoke(question)
+
+        # Extract text from valid documents
+        relevant_docs = []
+        for doc in retrieved_results:
+            if isinstance(doc, dict):
+                if "content" in doc:  # If "content" key exists, use it
+                    text = doc["content"]
+                elif "text" in doc:  # If "text" key exists (tables, figures, etc.), use it
+                    text = doc["text"]
+                else:
+                    print("⚠️ Warning: Retrieved document is missing text content:", doc)
+                    continue  # Skip invalid documents
+
+                # Ensure extracted text is a string
+                if isinstance(text, list):  # Convert list to string if needed
+                    text = " ".join(map(str, text))
+
+                relevant_docs.append(text)
+            elif isinstance(doc, str):  # If it's already a string, keep it
+                relevant_docs.append(doc)
+            else:
+                print("⚠️ Warning: Retrieved document is an unknown type:", type(doc))
+
+        # Combine retrieved chunks into a single formatted context string
+        full_context = "\n\n".join(relevant_docs)
+
+        # Limit context size to prevent exceeding token limit
+        trimmed_context = self._trim_context(full_context, max_tokens=8000)
+
+        # Generate response using GPT-4o-mini
+        response = self.llm.invoke(f"Context:\n{trimmed_context}\n\nQuestion: {question}")
+
+        return response
+
+    def _trim_context(self, text: str, max_tokens: int = 8000) -> str:
+        """Trims the context to fit within a safe token limit."""
+        enc = get_encoding("cl100k_base")  # Use OpenAI tokenizer
+        tokens = enc.encode(text)
+
+        # Keep only the first `max_tokens`
+        trimmed_tokens = tokens[:max_tokens]
+        return enc.decode(trimmed_tokens)
 
     def _format_docs(self, documents: List[Dict]) -> Dict:
         """Organize document content by type."""
@@ -661,7 +684,6 @@ Please provide a detailed answer based on the information given above."""
 #     if "OPENAI_API_KEY" not in os.environ:
 #         os.environ["OPENAI_API_KEY"] = getpass.getpass("OPENAI API Key:")
 
-
 def setup_api_keys() -> None:
     """Check for required API keys."""
     required_keys = ["UNSTRUCTURED_API_KEY", "OPENAI_API_KEY"]
@@ -708,12 +730,18 @@ def main():
 
     )
 
+    # vector_store = VectorStore(
+    #     dbname="VectorDB",
+    #     user="postgres",
+    #     password="12345",
+    #     host="localhost",
+    #     port="5432"
+    # )
+    
     vector_store = VectorStore(
-        dbname="VectorDB",
-        user="postgres",
-        password="12345",
-        host="localhost",
-        port="5432"
+        # db_url="postgresql://postgres.qcqeeulzbgezcrkvrhoh:WireAi#12345$@aws-0-us-west-1.pooler.supabase.com:6543/postgres",
+        db_url= "postgresql://postgres.qcqeeulzbgezcrkvrhoh:9CkzjF0rXdgmF3bV@aws-0-us-west-1.pooler.supabase.com:5432/postgres",
+        collection_name="pdf_vectors"
     )
 
     # Get and process document
